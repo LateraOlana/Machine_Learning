@@ -1,0 +1,1448 @@
+---
+title: "Machine Learning Project"
+author: "Latera Tesfaye Olana"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  word_document: default
+  pdf_document:
+    fig_caption: yes
+header-includes: \usepackage{float}
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H')
+```
+
+```{r setup, include=FALSE}
+### Setting up the packages
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE)
+# check if packages are installed; if not, install them
+packages <- c("tidyverse", "readr", "ggExtra", "plotly",
+              "ggplot2","ggstatsplot","ggside","rigr","nlme","lmtest",
+              "sandwich","gridExtra","broom","praznik","tidyr","DMwR2",
+              "smotefamily","rpart","tree","kernlab","caret","glmnet",
+              "MASS","vip","caret","class","gbm")
+not_installed <- setdiff(packages, rownames(installed.packages()))
+if (length(not_installed)) install.packages(not_installed)
+
+# load packages
+library(sandwich)
+library(gbm)
+library(randomForest)
+library(readr)
+library(lmtest)
+library(ggcorrplot)
+library(caret)
+library(vip)
+library(caretEnsemble)
+library(doParallel)
+library(MASS)
+library(nlme)
+library(tree)
+library(glmnet)
+library(broom)
+library(class)
+library(ggstatsplot)
+library(kernlab)
+library(ggside)
+library(rigr)
+library(rpart.plot)
+library(rpart)
+library(caret)
+library("DMwR2")
+library(pROC)
+library(praznik)
+library(ggExtra)
+library(gridExtra)
+library(plotly)
+library(ggplot2)
+library(tidyr)
+library(tidyverse) 
+
+```
+
+```{r, Q1a, include=F}
+
+### -----------------------------------------------------------
+#Loading working directory of the raw data
+
+#Please load your data/directory by changing it with your work directory
+#Throughout this code module you will see a tone of places, where
+#data is read and written, so please make sure to change them to your
+#working directory folder format
+
+working_directory_data <- setwd("C:/Users/latera/Desktop/ML_ass")
+
+#loads the data on a variable df
+load("data/ADProj.RData")
+
+study_data <- Map(as.data.frame, ADProj)
+study_train_data <- study_data[["X_train"]]
+study_train_respose <- study_data[["y_train"]]
+
+
+study_test_data <- study_data[["X_test"]]
+study_train_final <- cbind(study_train_data,study_train_respose)
+
+study_train_final %>%
+  mutate(Outcome = factor(Outcome, levels = c("C", "AD"), 
+                            labels = c("Control", "Alizahmer"))) -> 
+  study_train_final
+```
+
+```{r Q1a_missing, echo=T, message=TRUE, include=F, results='hide'}
+sum(is.na(study_data))
+```
+
+# Abstract
+
+The forthcoming comprehensive report endeavors to utilize various machine learning models to forecast patients with Alzheimer's Disease, in contrast to healthy elderly individuals, through an analysis of cerebral cortex thickness measurements. The rationale behind employing multiple models instead of relying on a single model lies in the fact that each machine learning model exhibits a distinct set of strengths and weaknesses, and there is no one model that universally outperforms others. By assessing various models, we circumvent potential biases that may arise from selecting a single model, thereby augmenting our confidence in the accuracy and generalizability of our findings. Furthermore, we mitigate the risk of data snooping and concentrate our efforts on the development of diverse models. This report will present a range of models, from simple linear models to intricate non-linear models.
+
+# The Data
+
+```{r Q1b}
+
+summary <- study_train_final %>%
+  group_by(Outcome) %>%
+  summarise(observations = n())
+
+knitr::kable(summary, caption = "Summary table of the data")
+
+```
+
+The data has zero missing values. In addition, it has `r summary$observations[1]` C outcome (hereafter, refereed to as no disease) observations and `r summary$observations[2]` AC (hereafter, refereed to as disease) observations. This shows the data is significantly unbalanced (Figure 5, in the supplementary section). The data has 360 predictors (p=`r dim(study_train_final)[2]`). Overall, the data has `r summary$observations[1] + summary$observations[2]` observations. The data is divided into two, training and test with each containing `r round(0.7*400, 2)` and `r round(0.3*400,2)`, respectively.
+
+
+
+```{r}
+set.seed(2)
+study_data_idx = createDataPartition(study_train_final$Outcome, 
+                                     p = 0.70, list = FALSE)
+study_data_trn = study_train_final[study_data_idx, ]
+study_data_tst = study_train_final[-study_data_idx, ]
+```
+
+Figure 6 in the data supplementary section, shows the scatter plot of the outcome for *P* values from 10 to 13. It doesn't seem like there clearly defined boundary for these predictors. However, if we were to reduce all predictors into two predictors (using PCA), as shown in figure 7 of the data supplementary section we can see that there is a clear distinction between distribution of the outcome values. This might imply linear simpler models might describe the data really well. For non-linear relationship, it may be more appropriate to use a non-linear models, such as a decision tree, random forest, gradient boosting, or a neural network. These types of models can capture more complex and nuanced relationships between predictors and the target variable, as opposed to linear models.  
+An alternative approach is to employ a K-nearest neighbors (KNN) model, which does not impose any predetermined mathematical function for relating the predictors to the target variable. Instead, this technique uses the closeness of data points to predict outcomes.  
+Figure 8 of the supplementary material shows the correlation between each predictors. Even though, it difficult to see the correlation between individual predictors, we can generally see there is smaller correlation.  
+
+
+```{r}
+#Model for returning best performing model, if needed
+get_best_result = function(fit_from_caret) {
+  best_model = which(rownames(fit_from_caret$results) ==
+                       rownames(fit_from_caret$bestTune))
+  optimum_result = fit_from_caret$results[best_model, ]
+  rownames(optimum_result) = NULL
+  optimum_result
+}
+```
+
+```{r}
+#Calculating accuracy
+calc_acc = function(actual, predicted) {
+  mean(actual == predicted)
+}
+```
+
+
+```{r}
+#Creating a Bayes classifier
+create_bayes_classifier <- function(model_fit) {
+
+  function(data, thresholds) {
+
+    add_class <- function(threshold) {
+
+      classes_predicted <- factor(
+        model_fit(data) > threshold,
+        levels = c(FALSE, TRUE),
+        labels = c("Control", "Alizahmer")
+      )
+
+      data %>% dplyr::mutate(
+        classes_predicted = classes_predicted,
+        threshold = threshold
+      )
+
+    }
+
+    thresholds %>% purrr::map_dfr(add_class)
+  }
+
+}
+```
+
+# Models
+
+## Simple Tree (Decision tree)
+
+We begin our journey with a basic tree structure. Figure 10 and 11 in the supplementary section of simple tree depict the use of an unpruned tree classifier on the entire dataset. Tree-based algorithms are a type of non-parametric model that divide the feature space into smaller regions with similar response values through binary recursive partitioning. Partitioning in classification problems typically maximizes the reduction in cross-entropy or the Gini index.
+
+```{r}
+set.seed(2)
+seat_tree = rpart(Outcome ~ ., data = study_data_trn, method = "class")
+```
+
+
+```{r}
+seat_tree_tst_pred = predict(seat_tree, study_data_tst, type = "class")
+seat_tree_trn_pred = predict(seat_tree, study_data_trn, type = "class")
+tst_tab = table(predicted = seat_tree_tst_pred, actual = study_data_tst$Outcome)
+trn_tab = table(predicted = seat_tree_trn_pred, actual = study_data_trn$Outcome)
+```
+
+```{r include=FALSE}
+#Bayes Rule - test
+prob_tst <- predict(seat_tree, newdata = study_data_tst, type = "prob")
+predictions_bayes_tst <- ifelse(prob_tst[,1] > 0.5, "Control", "Alizahmer")
+accuracy_bayes_tst <- calc_acc(study_data_tst$Outcome, predictions_bayes_tst)
+print(paste("Accuracy (Bayes rule):", accuracy_bayes_tst))
+```
+
+```{r include=FALSE}
+#Bayes Rule train
+prob_trn <- predict(seat_tree, study_data_trn, type = "prob")
+predictions_bayes_trn <- ifelse(prob_trn[,1] > 0.5, "Alizahmer", "Control")
+accuracy_bayes_trn <- calc_acc(study_data_trn$Outcome, predictions_bayes_trn)
+print(paste("Accuracy (Bayes rule):", accuracy_bayes_trn))
+```
+
+```{r}
+trn_con_mat = confusionMatrix(trn_tab, positive = "Alizahmer")
+
+knitr::kable(trn_tab, 
+      col.names = c("Control", "Alizahmer"),
+      digits = 5, caption = "Confussion matrix for test data")
+    
+knitr::kable(c(trn_con_mat$overall["Accuracy"],
+trn_con_mat$byClass["Sensitivity"],
+trn_con_mat$byClass["Specificity"], 
+trn_con_mat$byClass["Pos Pred Value"],
+trn_con_mat$byClass["Neg Pred Value"],
+trn_con_mat$byClass["Prevalence"],
+trn_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for test data")
+
+```
+
+```{r}
+tst_con_mat = confusionMatrix(tst_tab, positive = "Alizahmer")
+
+knitr::kable(tst_tab, 
+      col.names = c("Control", "Alizahmer"),
+      digits = 5, caption = "Confussion matrix for test data")
+    
+knitr::kable(c(tst_con_mat$overall["Accuracy"],
+tst_con_mat$byClass["Sensitivity"],
+tst_con_mat$byClass["Specificity"], 
+tst_con_mat$byClass["Pos Pred Value"],
+tst_con_mat$byClass["Neg Pred Value"],
+tst_con_mat$byClass["Prevalence"],
+tst_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for test data")
+
+```
+
+As shown in the summary table (table 2,3, 4 and 5) the train accuracy is `r round(accuracy_bayes_trn,2) * 100`%, whereas the test accuracy is `r round(accuracy_bayes_tst,2) * 100`%. To avoid over fitting the depth of the tree must be selected appropriately. To do that we will use pruning. I used *rpart* for this simple tree development. Figure 12 in the supplementary shows the complexity, cross-validation accuracy with different sizes of tree. 
+
+## Simple Tree - pruned
+
+We will find the optimal subtree by using a cost complexity parameter ($\alpha$) that penalizes our objective function for the number of terminal nodes of the tree (*T*).
+
+```{=tex}
+\begin{equation}
+\tag{1}
+ \texttt{minimize} \left\{ R(T) + \alpha \vert T \vert \right\}
+\end{equation}
+```
+
+Where *R(T)* is training error of leaf nodes; *|T|* — The number of leaf nodes; and $\alpha$  complexity parameter (here after known as cp). First we can plot tree size versus complexity parameter (*cp*) plot and find best value of cp, which is correspondent to a tree size of smallest error. *rpart* above has internally, built *k-fold = 10* values for varying tree size and cp values.
+
+```{r}
+min_cp = seat_tree$cptable[which.min(seat_tree$cptable[,"xerror"]),"CP"]
+```
+
+looking into figure 13 in the supplementary, no clear pattern between relative cross validation error and *cp* has been observed. Accordingly, we can use *R* to compute the best value for cp depending on the smallest error, which is `r round(min_cp,4)`. This correspondent to a tree size of 6.
+
+```{r e}
+set.seed(2)
+cv_tree <- train(
+  Outcome ~ .,
+  data = study_data_trn,
+  method = "rpart",
+  trControl = trainControl(method = "cv", number = 20),
+  tuneLength = 40
+)
+
+```
+
+We will now use *train* from *caret* package with cross-validation (k-fold = 20) to illustrate more about the selection of tree sizes. As it is shown on figure 14, for *cp* values of `r round(get_best_result(cv_tree)["cp"], 4)`  the tree size associated with this is 6 (similar to *rpart*). The cross validated accuracy related to this *cp* value is `r round(get_best_result(cv_tree)["Accuracy"],2)`.
+
+
+```{r include=FALSE}
+min_params <- get_best_result(cv_tree)
+```
+
+Figure 1 shows, the varying cross validated accuracy over different complexity values.
+
+```{r fig.height=1.5, fig.width=3, fig.cap="Complexity Vs Misclassification rate"}
+ggplot(cv_tree)+
+  theme_bw() +
+  theme(axis.line = element_line(colour = "white"),
+    panel.border = element_blank(),
+    panel.background = element_blank())+
+   theme(legend.title = element_blank())
+```
+
+Figure 15 in the supplementary material shows pruned tree with newly gained parameters. Figure 16 in the supplementary also shows the selected predictors. 
+
+```{r echo=FALSE}
+seat_rpart_prune = prune(seat_tree, cp = min_params[1,1])
+```
+
+```{r}
+seat_prune_trn_pred <- predict(seat_rpart_prune, study_data_trn, type = "class")
+seat_prune_tst_pred <- predict(seat_rpart_prune, study_data_tst, type = "class")
+```
+
+
+```{r}
+seat_prune_trn_pred = predict(seat_rpart_prune, study_data_trn, type = "class")
+
+trn_con_mat = confusionMatrix(table(predicted = seat_prune_trn_pred, actual = study_data_trn$Outcome), positive = "Alizahmer")
+
+knitr::kable(table(predicted = seat_prune_trn_pred, actual = study_data_trn$Outcome), 
+      col.names = c("Control", "Alizahmer"),
+      digits = 5, caption = "Confussion matrix for test data")
+    
+knitr::kable(c(trn_con_mat$overall["Accuracy"],
+trn_con_mat$byClass["Sensitivity"],
+trn_con_mat$byClass["Specificity"], 
+trn_con_mat$byClass["Pos Pred Value"],
+trn_con_mat$byClass["Neg Pred Value"],
+trn_con_mat$byClass["Prevalence"],
+trn_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for test data")
+```
+
+```{r}
+seat_prune_tst_pred = predict(seat_rpart_prune, study_data_tst, type = "class")
+
+tst_con_mat = confusionMatrix(table(predicted = seat_prune_tst_pred, actual = study_data_tst$Outcome), positive = "Alizahmer")
+
+knitr::kable(table(predicted = seat_prune_tst_pred, actual = study_data_tst$Outcome), 
+      col.names = c("Control", "Alizahmer"),
+      digits = 5, caption = "Confussion matrix for test data")
+    
+knitr::kable(c(tst_con_mat$overall["Accuracy"],
+tst_con_mat$byClass["Sensitivity"],
+tst_con_mat$byClass["Specificity"], 
+tst_con_mat$byClass["Pos Pred Value"],
+tst_con_mat$byClass["Neg Pred Value"],
+tst_con_mat$byClass["Prevalence"],
+tst_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for test data")
+
+```
+As shown in table 6,7,8, and 9, after pruning the test accuracy is `r round(tst_con_mat$overall["Accuracy"],2) * 100`%, where as, the train accuracy was `r round(tst_con_mat$overall["Accuracy"],2) * 100`%. After pruning the variance seemed to decrease. 
+
+In trees prediction tends to towards a group with highest number of observation (as in other types of classification model). However, the impact is accentuated in simple tress like this. We will look at several ways to fix this, including: bagging, boosting and random forests. Before we do that let's change gears and look at a linear model.
+
+## Logistic Regression
+
+Linear models (LMs) provide a simple, yet effective, approach to predictive modeling. Moreover, when certain assumptions required by LMs are met (e.g., constant variance), the estimated coefficients are unbiased and, of all linear unbiased estimates, have the lowest variance. However in this high dimentional set, trying to fit simple logistic regression (*glm*), the algorithm will not converge to a solution or find a unique solution. The increase in complexity can result in, where the predictors are highly correlated, leading to ill-conditioned matrices and slow convergence. Nevertheless, since our main goal is not to worry too much about our dataset.
+
+After fitting simple logistic regression, table 19 in the logistic supplementary section shows the fitted coefficients for some predictors (10), and it can clearly be seen for some it is not scientifically meaningful.
+
+```{r 1e_glm, warning=FALSE, include=FALSE}
+set.seed(2)
+model_glm = glm(Outcome ~ ., data = study_data_trn,
+                family = "binomial")
+
+```
+
+```{r}
+log_bayes_pred <- create_bayes_classifier(
+  function(data) predict(model_glm, data, type = "response")
+)
+```
+
+```{r warning=F}
+train_pred = log_bayes_pred(study_data_trn, 0.5)
+```
+
+```{r}
+train_tab_log = table(train_pred$classes_predicted, study_data_trn$Outcome)
+```
+
+```{r}
+train_con_mat_log = confusionMatrix(train_tab_log, positive = "Alizahmer")
+```
+
+
+```{r warning=FALSE}
+trest_pred = log_bayes_pred(study_data_tst, 0.5)
+```
+
+```{r}
+test_tab_log = table(trest_pred$classes_predicted, study_data_tst$Outcome)
+```
+
+```{r}
+test_con_mat_log = confusionMatrix(test_tab_log, positive = "Alizahmer")
+```
+
+In addition as shown in table 20 of the logistic supplementary section, for the simple logistic regression the test accuracy is `r round(test_con_mat_log$overall["Accuracy"],2) * 100`%, where as, the train accuracy was `r round(train_con_mat_log$overall["Accuracy"],2) * 100`%. As expected the test accuracy is very small.
+
+## Logistic Regression - regulirized
+
+As previously mentioned, simple logistic regression was not appropriate for solving this particular problem. Regularization methods offer a way to limit or regulate the estimated coefficients, which can lower variance and decrease error.
+
+In this work I will use generalization of the ridge and lasso penalties, called elastic net. \begin{equation}
+\text{minimize }(-\text{loglikelihood } + \lambda [\alpha ||\beta||_1 + (1 - \alpha) ||\beta||_2^2])
+\end{equation}
+
+Where, loglikelihood is the log-likelihood of the data under the logistic regression model; β is the vector of logistic regression coefficients to be estimated; λ is the regularization parameter controlling the strength of regularization; α is the mixing parameter controlling the trade-off between the L1 and L2 penalty terms.
+
+```{r}
+set.seed(2)
+
+elastic_mod = train(
+  Outcome ~ ., data = study_data_trn,
+  method = "glmnet",
+  trControl = trainControl(method = "cv", number = 5),
+  tuneLength = 20,
+  tuneGrid = expand.grid(alpha = seq(0, 1, by = 0.01), 
+                         lambda = 10^seq(5, -18, length = 100)),
+  family = "binomial"
+)
+
+```
+
+The grid tuning use cross validation with (*k-fold = 5*) and tune length of 20, and the selected $\alpha$ values are generated using *seq(0, 1, by = 0.01)* rule. Whereas, the $\lambda$ are generated using $10^{seq(5, -18, length = 100)}$. When performing a grid search, it is often useful to use lambda with a range of values, with increasingly larger gaps between the values as the values become larger. For this task I have used *caret* library. Table 4 shows the selected parameters for the best performing model after tuning. 
+
+```{r results='asis'}
+knitr::kable(get_best_result(elastic_mod), caption = "GLM net model specifications cross validation")
+```
+
+Accordingly, as shown in table 10, the selected parameters are $\alpha$ value of `r min(unique(elastic_mod$results[,"alpha"]))` and $\lambda$ value of `r get_best_result(elastic_mod)["lambda"]`.
+
+
+Figure xx in the supplementary section of logistic regression (regularized) shows (plot of mixing percentage ($\lambda$) and accuracy) give us a hint in the trade-off between model complexity and accuracy. Typically, a lower value of lambda will result in a more complex model that fits the data well but may over fits and it has been the case in our situation. Another indication of overfitting is the accuracy is high for low values of lambda but decreases rapidly as lambda increases ($\lambda$ \> 0.1).
+
+```{r}
+
+pred_bayes_regu_cv <- create_bayes_classifier (
+  function(data) predict(elastic_mod, data, type="prob")[,"Alizahmer"]
+)
+```
+
+```{r}
+train_pred = pred_bayes_regu_cv(study_data_trn, 0.5)
+```
+
+```{r}
+train_tab = table(train_pred$classes_predicted, study_data_trn$Outcome)
+```
+
+```{r}
+train_con_mat_log_reg = confusionMatrix(train_tab, positive = "Alizahmer")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat_log_reg$overall["Accuracy"],
+train_con_mat_log_reg$byClass["Sensitivity"],
+train_con_mat_log_reg$byClass["Specificity"], 
+train_con_mat_log_reg$byClass["Pos Pred Value"],
+train_con_mat_log_reg$byClass["Neg Pred Value"],
+train_con_mat_log_reg$byClass["Prevalence"],
+train_con_mat_log_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+```{r}
+tst_pred = pred_bayes_regu_cv(study_data_tst, 0.5)
+```
+
+```{r}
+tst_tab = table(tst_pred$classes_predicted, study_data_tst$Outcome)
+```
+
+```{r}
+tst_con_mat_log_reg = confusionMatrix(tst_tab, positive = "Alizahmer")
+
+knitr::kable(tst_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(tst_con_mat_log_reg$overall["Accuracy"],
+tst_con_mat_log_reg$byClass["Sensitivity"],
+tst_con_mat_log_reg$byClass["Specificity"], 
+tst_con_mat_log_reg$byClass["Pos Pred Value"],
+tst_con_mat_log_reg$byClass["Neg Pred Value"],
+tst_con_mat_log_reg$byClass["Prevalence"],
+tst_con_mat_log_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+As shown in table 11, 12, 13, and 14, the test accuracy for this model is `r round(tst_con_mat_log_reg$overall["Accuracy"],2) * 100`%, where as, the train accuracy was estimated to be `r round(train_con_mat_log_reg$overall["Accuracy"],2) * 100`%. Compared to the simple logistic regression model this regularized elastic model does much better in-terms of accuracy and reducing the risk of over-fitting. This is an incredible accuracy level.
+
+```{r echo=FALSE, fig.height=4, fig.width=3, message=FALSE, warning=FALSE, fig.cap="ROC curve for GLM net fit"}
+test_prob = predict(elastic_mod, newdata = study_data_tst, 
+                    type = "prob")[, "Alizahmer"]
+test_roc = roc(study_data_tst$Outcome ~ test_prob, plot = TRUE, 
+               print.auc = TRUE, col=8)
+```
+
+As shown in figure 2, the ROC for elastic model with AUC of `r round(test_roc$auc * 100,2)`%. Figure xx in supplementary material shows the selected feature for this model.
+
+```{r}
+non_zero <- data.frame(as.matrix(coef(elastic_mod$finalModel, elastic_mod$bestTune$lambda)))
+
+```
+
+Overall, there were `r sum(non_zero == 0)` beta values i.e., `r 360 - sum(non_zero == 0)`non-zero beta values were estimated for this model. Check additional description for this model in the supplementary section.
+
+
+## kNN 
+
+kNN is framed as a non-parametric model for the probabilities $p_g(x) = P(Y = g \mid X = x)$. It models *k* neighbors estimates this probability as $$\hat{p}_{kg}(x) = \hat{P}_k(Y = g \mid X = x) = \frac{1}{k} \sum_{i \in \mathcal{N}_k(x, \mathcal{D})} I(y_i = g)$$. Essentially, the probability of each class *g* is the proportion of the *k* neighbors of x with that class, g. Then to create a classifier we use: $$\hat{C}_k(x) =  \underset{g}{\mathrm{argmax}} \ \ \hat{p}_{kg}(x)$$. In this work since we are focused on binary outcome, the classifier can be re-written as $$\hat{C}_k(x) = 
+\begin{cases} 
+      1 & \hat{p}_{k0}(x) > 0.5 \\
+      0 & \hat{p}_{k1}(x) < 0.5
+\end{cases}$$. In this work to avoid large numbers impacting other variables distance measurement, we will scale the predictors. For selecting which *k* value to use, we will try many options and select the one with lowest error rate and smaller chance of overfitting.
+
+```{r}
+
+set.seed(2)
+confusion_matrix <- function(data, classes_ob, classes_predicted) {
+
+  data %>%
+    dplyr::group_by({{classes_ob}}, {{classes_predicted}}, .add = TRUE) %>%
+    dplyr::summarise(count = n()) %>%
+    tidyr::pivot_wider(
+      names_from = {{classes_predicted}},
+      values_from = count,
+      values_fill = 0
+    ) %>%
+    dplyr::ungroup({{classes_ob}}) %>%
+    dplyr::rename(`Predicted -> Observed` = {{classes_ob}})
+
+}
+```
+
+```{r message=FALSE, message=FALSE}
+
+set.seed(2)
+prediction_knn <- function(data, k_neighbors) {
+  # Scale the features in the training data
+  df_train_scale <- study_data_trn %>%
+    mutate(across(P_1:P_360, ~scale(as.numeric(.x))))
+
+  # Scale the features in the test data
+  df_test_scale <- data %>%
+    mutate(across(P_1:P_360, ~scale(as.numeric(.x))))
+
+  # Function to add predictions based on a given number of nearest neighbors
+  add_preds <- function(k) {
+    data %>%
+        mutate(
+          classes_predicted = knn(
+            train = dplyr::select(df_train_scale, P_1:P_360),
+            test = dplyr::select(df_test_scale, P_1:P_360),
+            cl = df_train_scale$Outcome,
+            k = k
+          ),
+          k = k
+        )
+  }
+
+  # Apply the add_preds function to each number of neighbors in k_neighbors
+  k_neighbors %>% map_dfr(add_preds)
+}
+
+classes <- list(
+  train = prediction_knn(study_data_trn, c(1:20)) %>% group_by(k),
+  test = prediction_knn(study_data_tst, c(1:20)) %>% group_by(k)
+)
+confusion_matrix_knn <- list(
+  train = classes$train %>% confusion_matrix(Outcome, classes_predicted),
+  test = classes$test %>% confusion_matrix(Outcome, classes_predicted)
+)
+accuracy_knn <- list(
+  train = classes$train %>% summarise(accuracy = mean(Outcome == classes_predicted)),
+  test = classes$test %>% summarise(accuracy = mean(Outcome ==
+                                                      classes_predicted))
+)
+```
+
+Table xx in the supplementary for the kNN shows the confusion table for all values of k (from 1 to 20). Table xx in the supplementary, shows the test and train accuracy for 20 different *k* values (1 to 20). Generally, *k* values from 10 to 17 can be used as the difference between test and train accuracy is small and they have the highest test accuracy.
+
+```{r}
+set.seed(2)
+pred_acc_knn <-
+  list(train = study_data_trn, test = study_data_tst) %>%
+  purrr::map(~prediction_knn(.x, 1:20) %>% group_by(k)) %>%
+  purrr::map_dfr(
+    ~summarise(.x, accuracy = mean(Outcome == classes_predicted)),
+    .id = "data_set"
+  )
+plot_pred_acc_knn <-
+  ggplot(pred_acc_knn, aes(x = k, y = accuracy, color = data_set)) +
+  geom_line(lty = "dashed") +
+  geom_point() +
+  theme_bw() +
+  theme(axis.line = element_line(colour = "white"),
+        axis.ticks = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank())+ 
+  theme(legend.background = element_rect
+        (fill = "transparent"))+
+  labs(
+    title = "Predictive Accuracy - KNN",
+    x = "K values",
+    y = "Accuracy",
+    color = "Train/Test"
+  )
+```
+
+Figure 3 also shows the tradeoff plot between test and train accuracy with varying k values. As it is shown in the figure xx the test  and train accuracy will start decreasing after *k = 19* (we tested 100 k-values, from 1 to 100). *k = 10, 11, 12, 13, 14* has the highest test accuracy, which is also close to train accuracy. However, *k = 10* or *k = 12* has the highest test accuracy, but it has a tendency to underfit.
+
+```{r testVstrain, echo=FALSE, fig.cap="Train-test accuracy"}
+plot(plot_pred_acc_knn)
+```
+
+Figure xx in the supplementary section for kNN also shows test error rates with varying *k* values. The dotted orange line represents the smallest observed test classification error rate. We can fit our *knn* model using *k = 12*.   
+
+```{r}
+set.seed(2)
+df_train_scale <- study_data_trn %>%
+    mutate(across(P_1:P_360, ~scale(as.numeric(.x))))
+
+# Scale the features in the test data
+df_test_scale <- study_data_tst %>%
+    mutate(across(P_1:P_360, ~scale(as.numeric(.x))))
+
+model_knn <-knn(
+     train = dplyr::select(df_train_scale, P_1:P_360),
+     test = dplyr::select(df_test_scale, P_1:P_360),
+     cl = df_train_scale$Outcome,
+     k = 12)
+
+```
+
+Finally, as shown in table xx of the supplementary material for kNN, the train accuracy related to *k* value of 12 is 93.2% and the test accuracy is `r round(calc_acc(study_data_tst$Outcome,model_knn),2) * 100`%.  
+
+In the above model we used *knn* model from *class* library. We can also use cross validation for selecting *k* values using *caret* library. For caret center and scale was used for scaling. The center subtracts the mean of the predictor's data from the predictor values while scale divides by the standard deviation. Accordingly, this transforms the data into mean of zero and standard error of one. *k-fold* of 10 with 3 repitation and tune length of 20 were used.
+
+```{r}
+set.seed(2)
+trctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 3)
+
+knn_fit <- train(Outcome ~., data = study_data_trn, method = "knn",
+ trControl=trctrl,
+ preProcess = c("center", "scale"),
+ tuneLength = 20)
+```
+
+
+```{r}
+pred_bayes_knn_cv <- create_bayes_classifier (
+  function(data) predict(knn_fit, data, type="prob")[,"Alizahmer"]
+)
+```
+
+
+```{r}
+train_pred = pred_bayes_knn_cv(study_data_trn, 0.5)
+```
+
+```{r}
+train_tab = table(train_pred$classes_predicted, study_data_trn$Outcome)
+```
+
+```{r}
+train_con_mat_knn_reg = confusionMatrix(train_tab, positive = "Alizahmer")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat_knn_reg$overall["Accuracy"],
+train_con_mat_knn_reg$byClass["Sensitivity"],
+train_con_mat_knn_reg$byClass["Specificity"], 
+train_con_mat_knn_reg$byClass["Pos Pred Value"],
+train_con_mat_knn_reg$byClass["Neg Pred Value"],
+train_con_mat_knn_reg$byClass["Prevalence"],
+train_con_mat_knn_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+```{r}
+tst_pred = pred_bayes_knn_cv(study_data_tst, 0.5)
+```
+
+```{r}
+tst_tab = table(tst_pred$classes_predicted, study_data_tst$Outcome)
+```
+
+```{r}
+tst_con_mat_knn_reg = confusionMatrix(tst_tab, positive = "Alizahmer")
+
+knitr::kable(tst_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(tst_con_mat_knn_reg$overall["Accuracy"],
+tst_con_mat_knn_reg$byClass["Sensitivity"],
+tst_con_mat_knn_reg$byClass["Specificity"], 
+tst_con_mat_knn_reg$byClass["Pos Pred Value"],
+tst_con_mat_knn_reg$byClass["Neg Pred Value"],
+tst_con_mat_knn_reg$byClass["Prevalence"],
+tst_con_mat_knn_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+Table 15, 16, 17, and 18, shows the confusion matrix, accuracy specifics on both train data and test data and cross validated accuracy values for varying neighbors value. Using the selected value of `r get_best_result(knn_fit)["k"]` after cross validation the selected model specifications and validation scores are in supplementary table under kNN section. Figure xx and table xx on the supplementary section for kNN also shows varying cross validated with changing *k* values. 
+
+```{r}
+test_prob_n = predict(knn_fit, newdata = study_data_tst, 
+                    type = "prob")[,"Alizahmer"]
+test_rocN = roc(study_data_tst$Outcome ~ test_prob_n, plot = TRUE, 
+               print.auc = TRUE, col=8)
+```
+
+# Ensemble models - Bagging
+## Random forest  
+
+Random forests are an adapted version of bagged decision trees that construct a vast set of uncorrelated trees to enhance predictive accuracy. This learning algorithm has gained widespread popularity due to its good predictive performance with minimal hyperparameter tuning. During the bagging process, while building a decision tree, random forests employ split-variable randomization. This method restricts the search for the split variable to a random subset of $m$ of the original *p* values whenever a split is required. Typical value of $m$ for classification is $\sqrt{p}$. For the first part, I will use *randomForest* library, which we have seen in class.
+
+
+```{r}
+set.seed(2) 
+bagged_trees_rf <- randomForest(Outcome ~ ., data = study_data_trn, mtry = sqrt(ncol(study_data_trn) - 1), importance=TRUE)
+train_pred_rf <- predict(bagged_trees_rf, study_data_trn)
+test_pred_rf <- predict(bagged_trees_rf, study_data_tst)
+```
+
+Using this value of $m$ the test accuracy was calculated to be `r round( calc_acc(study_data_tst$Outcome, test_pred_rf) * 100,2)` and the train accuracy was `r round( calc_acc(study_data_trn$Outcome, train_pred_rf) * 100,2)`. There is a significant sign of over fitting. In addition, the under performance of random forest as compared to simpler methods that we have seen above tells as about the linearity of the given data.
+
+Let's try tuning some parameters. We will be using *caret* library for this. The hyper parameters, which we will be focusing on is:
+
+  -   **The number of features to consider at any given split: $m_{try}$** This parameter tuning has the highest impact on the model's accuracy. In this project we will use a 5, 15, 33, 40, 50, 90, and 100% of our number of predictors (will take 45 minutes to run). A grid search on all potential values of $m_{try}$ was used, i.e., from 1 to 360, but on my personal laptop it takes more than 9 hours (I stopped it at the ninth hour).
+
+We can also tune number of trees (not a hyperparameter per se), the complexity of each tree, sampling scheme, and splitting rule, however, these have only marginal effect in increasing the accuracy of the model.  
+
+```{r}
+set.seed(2)
+
+control <- trainControl(method='repeatedcv', 
+                        number=10, 
+                        repeats=3, 
+                        search='grid')
+
+tunegrid <- expand.grid(.mtry = 360 * c(.05, .15, .25, .333, .4, 0.5, 1)) 
+
+rf_gridsearch <- train(Outcome ~ ., 
+                       data = study_data_trn,
+                       method = 'rf',
+                       metric = 'Accuracy',
+                       tuneGrid = tunegrid)
+```
+
+Figure 4 shows different bootstrapped accuracy over varying randomly selected predictors.  As shown in the figure $m_{try}$ of 90 was selected and the corresponding accuracy is 84.7%. 
+
+```{r dd, echo=FALSE, fig.cap="Accuracy (bootstrap) versus mtry for random forest"}
+plot(rf_gridsearch)
+```
+
+
+```{r}
+train_pred_rf <- predict(rf_gridsearch, study_data_trn)
+test_pred_rf <- predict(rf_gridsearch, study_data_tst)
+```
+
+As shown in the table xx of the supplementary section for random forest the test accuracy of this tuned model is `r round(calc_acc(study_data_tst$Outcome, test_pred_rf) * 100,2)`. The accuracy increased as compared to the un-tuned model. The train accuracy is `r round( calc_acc(study_data_trn$Outcome, train_pred_rf) * 100,2)`. Figure xx in the supplementary section of random forest shows the top ten selected features. 
+
+# Boosting
+
+There are various supervised machine learning algorithms that use a single predictive model, such as ordinary linear regression, penalized regression models, and single decision trees. In contrast, bagging and random forests combine multiple models to create an ensemble, which improves the accuracy of predictions. The ensemble generates new predictions by combining the predictions of the individual base models. Accordingly, bagging (and random forests) work best with models that have high variance and low bias, like an overgrown decision tree. Boosting is a general algorithm for creating an ensemble using simpler models, usually decision trees. However, boosting is most effective with models that have low bias and high variance. 
+
+## Simple GBM 
+
+Gradient Boosting Machines (GBMs) are a highly renowned and widely adopted machine learning algorithm that has demonstrated remarkable efficacy across a variety of application domains. In contrast to Random Forest, GBMs create an ensemble of weak or shallow trees in a sequential manner, whereby each subsequent tree improves on the predictive power of the prior tree. For the simple GMB we will use *gbm* function (distribution = Bernoulli), with n.trees = 2000, interaction.depth = 6, and shrinkage = 0.01. This takes 3 minutes. 
+
+
+```{r message=FALSE}
+
+stu_train_int <- study_data_trn %>% mutate(Outcome = as.integer(Outcome) - 1L)
+stu_test_int <- study_data_tst %>% mutate(Outcome = as.integer(Outcome) - 1L)
+
+
+set.seed(2)
+boost_model <- gbm(Outcome ~ ., data = stu_train_int, distribution = "bernoulli",
+                   n.trees = 2000, interaction.depth = 6, shrinkage = 0.01,
+                   cv.folds = 10)
+
+# Compute the predicted labels for the training and test data
+train_preds_boost_no_cv <- ifelse(predict(boost_model, study_data_trn, type = "response") > 0.5, "Alizahmer", "Control")
+test_preds_boost_no_cv <- ifelse(predict(boost_model, study_data_tst, type = 
+                                     "response") > 0.5, "Alizahmer", "Control")
+
+```
+
+For this boosting model the train accuracy is `r round((calc_acc(study_data_trn$Outcome, train_preds_boost_no_cv) * 100),2)` %, where as the test accuracy is `r round((calc_acc(study_data_tst$Outcome, test_preds_boost_no_cv) * 100),2)` %. Well improved performance as compared to random forest. 
+
+Figure xx in the supplementary section for simple GBM shows a cross validated error and n trees. n tree of 746 seems an optimum point. 
+
+We can also use grid search for tuning some of boosting hyperparameters. I used the following for tuning the parameters: interaction depth = 1 to 7; number of trees from 500 to 3,000; shrinkage = 0.5, 0.3, 0.1, 0.05, 0.01; and the minimum number of observations in a node of the tree 5, 10, 15, 20. The algorithm  took **12 hours** to complete running. Rather than tuning all parameters together, for randomly selected value of learning rate (usually high value) we can find best number of tree. Then we can tune the learning rate by using the newly acquired number of tree while keeping others constant. After getting the learning rate we can tune other tree specific parameters (a lot of work, but faster).
+
+```{r cache=TRUE}
+
+#Parallel computing with 7 workers
+#cl <- makePSOCKcluster(7)
+#registerDoParallel(cl)
+
+set.seed(2)
+cv_10 = trainControl(method = "cv", number = 10)
+
+gbm_grid =  expand.grid(interaction.depth = 6,
+                        n.trees = (1:4) * 100,
+                        shrinkage = c(0.3, 0.1, 0.05, 0.01),
+                        n.minobsinnode = c(15, 20))
+
+#gbm_grid =  expand.grid(interaction.depth = 1:7,
+#                        n.trees = (1:6) * 500,
+#                        shrinkage = c(0.5, 0.3, 0.1, 0.05, 0.01),
+#                        n.minobsinnode = c(5, 10, 15, 20))
+seat_gbm_tune = train(Outcome ~ ., data = study_data_trn,
+                      method = "gbm",
+                      trControl = cv_10,
+                      verbose = FALSE,
+                      tuneGrid = gbm_grid)
+```
+
+```{r img33, echo=FALSE, out.width = "70%", fig.align = "center", fig.cap="Plot for tuning of boosting."}
+
+knitr::include_graphics("CV_boosting.png")
+```
+
+In this work all the parameters are defined together and will be tuned together. Overall, for this defined values `r nrow(seat_gbm_tune$results)` models were tried.
+
+Table xx in the supplementary section for simple GBM shows the selected parameters for after tuning.  
+
+As it is shown in table xx of the supplementary section for simple GBM (tuned), the train accuracy is 100%, where as, the test accuracy is 94.6%. Slight increment as compared to the un-tuned GBM in-terms of accuracy.   
+
+
+# Stacking of existing models
+
+Stacking, is designed to ensemble a diverse group of strong learners. The first potential candidates were all the models we have seen above. However, I have removed random forest as it actually reduced the overall accuracy of the stacked model. For each candidate base learners, we can go through hyperparameter tuning while building the stacked model. Fearing this might take a very long time (days, maybe) I decided to use default tuning setup provided in *caret* in building my ensemble. Parallel programming is an option, but this quarter drained me of the motivation and energy to do so. For stacking we will *caretEnsemble and caretList* library. The steps we will follow are:
+  -   Train the base models (regularized logistic regression - *glmnet*, simple boosting - *gbm*, and k Nearest Neighbors - *knn*) with tuned parameters (but the tuning was across default value).
+  -   Perform k-fold CV on each of the base learners and collect the cross-validated predictions (N) from each (the same k-folds must be used for each base learner). 
+  -   Create a data using K times cross-validated predicted values (N) along with our response (y), where K is the number of base learner models.
+  
+  \begin{equation}
+ n \Bigg \{ \Bigg [ p_1 \Bigg ] \cdots \Bigg [ p_L \Bigg ] \Bigg [ y \Bigg ] \rightarrow n \Bigg \{ \overbrace{\Bigg [ \quad Z \quad \Bigg ]}^L \Bigg [ y \Bigg ]
+ \end{equation} Where n is observation number
+  -   Train the ensemble model (meta model, in this case we will use simple model which is regularized logistic regression implemented by *glmnet* ) on the above data matrix.
+
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+
+set.seed(2)
+
+methods = c("glmnet", "gbm","knn")
+
+tc = trainControl(method = "repeatedcv", number = 10, repeats = 10, search = "grid", savePredictions = "final", index = createResample(study_data_trn$Outcome, 10), summaryFunction = twoClassSummary, classProbs = TRUE, verboseIter = TRUE)
+
+models = caretList(Outcome~., data = study_data_trn, 
+                   trControl = tc, methodList = methods)
+
+output = resamples(models)
+
+stack = caretStack(models, method="glmnet", trControl = tc)
+
+
+pred = predict(stack, study_data_tst)
+cm = confusionMatrix(study_data_tst$Outcome, pred)
+
+```
+
+
+```{r namename, echo=FALSE,  fig.cap="ROC, specificty, and sensetivity plot for the base learners"}
+
+dotplot(output)
+
+```
+
+
+
+```{r eval=FALSE, include=FALSE}
+test_prob = predict(elastic_mod, newdata = study_test_data)
+write.table(test_prob, file = "new_elastic_97.txt", sep = "\t",
+            row.names = FALSE)
+```
+
+
+Figure 4 shows the dot plot showing ROC, sensitivity and specificity of the base learners model. As it is clearly shown the simple model, i.e, *glmnet* out performed the much complex model as boosting. The correlation plot and matrix of these three models is shown in table xx and figure xx of the supplementary material section of stacking. The accuracy of the stacked model as shown in table xx of the supplementary section is 96%. Since the base base learners are correlated the additional accuracy gain is very small. Figure xx, of the supplementary section for simple GBM also shows the first 10 important features for this model.
+
+\pagebreak
+
+
+# Supplimentary materials
+
+## Data
+
+```{r i1, echo=FALSE, fig.height=4, fig.width=6, fig.cap="Outcome groups"}
+
+specie <- c(rep("Outcome" , 2) )
+condition <- rep(c("Control", "Alizahmer") , 2)
+value = c(10,100)
+data <- data.frame(specie,condition,value)
+ 
+# Stacked
+ggplot(data, aes(fill=condition, y=value, x=specie)) + 
+    geom_bar(position="fill", stat="identity")+
+  xlab("Outcome type") + ylab("Percentage contribution")+theme_minimal() +
+        theme(plot.background = element_blank(),
+              panel.grid.minor = element_blank(),
+              panel.grid.major.y = element_blank(),
+              panel.grid.major.x =  element_blank()
+              )
+
+```
+
+
+```{r 1c1, echo=FALSE, fig.height=6, fig.width=8, fig.cap="Scatter plot of the data"}
+featurePlot(x = study_data_trn[, 10:13],
+y = study_data_trn$Outcome,
+plot = "pairs",
+auto.key = list(columns = 2))
+```
+
+
+```{r echo=FALSE, fig.height=3, fig.width=3, message=FALSE, fig.cap="PCA reduced to two variables and plotted"}
+library("factoextra")
+library("ggplot2")
+
+pca_study <- study_train_final
+
+
+
+# Extract predictor variables and center and scale them
+predictor_vars <- pca_study[, 1:360]
+
+# Compute principal components
+pca_result <- prcomp(predictor_vars)
+
+# Extract first two principal components
+pc1 <- pca_result$x[, 1]
+pc2 <- pca_result$x[, 2]
+
+ggplot(data = pca_study, aes(x = pc1, y = pc2, color = Outcome)) +
+  geom_point(size=1.6) +
+  xlab("Reduced dimention 1") + ylab("Reduced dimention 2")+theme_minimal() +
+        theme(plot.background = element_blank(),
+              panel.grid.minor = element_blank(),
+              panel.grid.major.y = element_blank(),
+              panel.grid.major.x =  element_blank()
+              )
+
+```
+
+
+```{r}
+compute_corr_matrix <- function(df) {
+  # Select all columns except the first one (assumed to be the response variable)
+  X_cols <- 1:360
+  
+  # Compute the correlation matrix on the predictors
+  corr_mat <- cor(df[, X_cols])
+  
+  # Plot the correlation matrix using ggcorrplot
+  ggcorrplot(corr_mat, type = "lower", lab = FALSE, 
+             title = "Correlation Matrix of Predictors",
+             ggtheme = ggplot2::theme_gray,
+             legend.title = "Correlation scale")
+}
+
+```
+
+```{r fig.height=10, fig.width=14, fig.cap="Correlation matrix for our train data"}
+compute_corr_matrix(study_data_trn)
+```
+
+## Simple tree
+
+```{r}
+set.seed(2)
+#Un proned
+seat_tree_all = rpart(Outcome ~ ., data = study_train_final)
+#summary(seat_tree)
+```
+
+```{r img1, echo=FALSE, fig.height=6, fig.width=4, fig.cap="Tree of the data"}
+rpart.plot(seat_tree_all)
+title(main = "Unpruned Classification Tree - total data")
+```
+
+
+```{r img, echo=FALSE, fig.height=4, fig.width=6, fig.cap="Tree of train data"}
+rpart.plot(seat_tree)
+title(main = "Unpruned Classification Tree - train")
+```
+
+```{r}
+plotcp(seat_tree)
+```
+
+```{r echo=FALSE, fig.height=2, fig.width=4, fig.cap="Pruned Tree"}
+seat_rpart_prune = prune(seat_tree, cp = min_params[1,1])
+
+rpart.plot(seat_rpart_prune)
+
+title(main = "Pruned Classification Tree")
+
+```
+
+```{r echo=FALSE, fig.height=6, fig.width=5, fig.cap="Features selected after pruning"}
+vip(cv_tree, num_features = 40, bar = FALSE)
+```
+
+## Logistic Regression
+
+```{r}
+model_glm_summary <- summary(model_glm, correlation = TRUE)
+
+knitr::kable(
+  coef(model_glm_summary)[0:10,],
+  digits = 2,
+  caption = "Logistic regression training coefficients (for the first 10 
+  predictors)"
+)
+```
+
+
+```{r}
+
+knitr::kable(train_tab_log, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat_log$overall["Accuracy"],
+train_con_mat_log$byClass["Sensitivity"],
+train_con_mat_log$byClass["Specificity"], 
+train_con_mat_log$byClass["Pos Pred Value"],
+train_con_mat_log$byClass["Neg Pred Value"],
+train_con_mat_log$byClass["Prevalence"],
+train_con_mat_log$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+```{r}
+
+knitr::kable(test_tab_log, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5,caption = "Confussion matrix for test data")
+
+knitr::kable(c(test_con_mat_log$overall["Accuracy"],
+test_con_mat_log$byClass["Sensitivity"],
+test_con_mat_log$byClass["Specificity"], 
+test_con_mat_log$byClass["Pos Pred Value"],
+test_con_mat_log$byClass["Neg Pred Value"],
+test_con_mat_log$byClass["Prevalence"],
+test_con_mat_log$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+test data")
+```
+
+```{r echo=FALSE, fig.cap="GLM net cross validation", fig.height=10, fig.width=14}
+plot(elastic_mod)
+```
+
+```{r echo=FALSE, fig.width=3, fig.cap="Features extracted from through GLM net  - elastic"}
+#vip(elastic_mod, num_features = 20, geom = "point")
+
+vip(elastic_mod, num_features = 20, geom = "point", horizontal = FALSE, 
+    aesthetics = list(color = "red", shape = 17, size = 4)) +
+  theme_light()
+```
+
+For providing additional information and analysis on the use of elastic net, I will use the *glmnet* function as it is more flexible.
+
+```{r}
+X_study_trn <- study_data_trn %>% select(-Outcome) %>% as.matrix()
+X_study_tst <- study_data_tst %>% select(-Outcome) %>% as.matrix()
+
+Y_study_trn <- study_data_trn$Outcome
+Y_study_tst <- study_data_tst$Outcome
+```
+
+I fitted glmnet (family of *binomial*) using the given different $\lambda$ values. As we have seen above the $\alpha$ value of the elastic net is close to ridge, so we will use $\alpha$ of 0 in this exploration. 
+
+```{r}
+# Create a grid of values for lambda
+lambda_seq <- 10^seq(5, -18, length = 100)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+set.seed(2)
+# Fit the ridge logistic regression model
+ridge_fit <- glmnet(X_study_trn, Y_study_trn, family = "binomial", alpha = 0, 
+                    lambda = lambda_seq)
+```
+
+Figure xx shows all coefficient values for the selected $\alpha$ and $\lambda$ values.
+
+```{r fig.height=5, fig.width=7, fig.cap="log(lambda) Vs beta values for all the predictors - simple ridge fit"}
+
+coef_P1 <- coef(ridge_fit)["P_1", ]
+
+
+# Plot the coefficients in function of log(lambda)
+plot(log(ridge_fit$lambda), coef_P1, type = "l", xlab = "log(lambda)", 
+     ylab = "Coefficient")
+for (k in 2:360) {
+  coef_P3 <- coef(ridge_fit)[k, ]
+  lines(log(ridge_fit$lambda), coef_P3, type = "l", col = "blue")
+
+}
+
+abline(v=0, col = "lightgray", lty = 3)
+```
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Fit the ridge logistic regression model
+cvfit <- cv.glmnet(X_study_trn, Y_study_trn, family = "binomial", 
+                   type.measure = "class",
+                   alpha = 0, lambda = lambda_seq)
+
+# Find optimal lambda value that minimizes CV error
+opt_lambda <- cvfit$lambda.min
+#cat("Optimal lambda value:", opt_lambda, "\n")
+
+
+```
+
+
+Figure xx also shows the mis-classifaction error and $\text{log}(\lambda)$. The mis-classification error is calculated based on the cross-validation results, and $\lambda$ controls the strength of regularization applied to the model. The goal is to choose a value of $\lambda$ that balances regularization with model performance on new data. This figure shows how mis-classifications error changes with increasing $\lambda$ value and where this potential $\lambda$ value is. 
+
+```{r fig.height=5, fig.width=7, fig.cap="Misclassification Error vs. Log(lambda)"}
+# Plot mis-classification error vs. log(lambda)
+plot(cvfit, xlab = "Log(lambda)")
+```
+
+## KNN 
+
+
+```{r results='asis'}
+print_table <- function(k, data, type) {
+  print(knitr::kable(
+    x = data,
+    caption = sprintf("%s kNN confusion matrix (k = %d)", type, k)
+  ))
+}
+confusion_matrix_knn$train %>%
+  tidyr::nest(data = -k) %>%
+  purrr::pwalk(print_table, type = "Training")
+confusion_matrix_knn$test %>%
+  tidyr::nest(data = -k) %>%
+  purrr::pwalk(print_table, type = "Test")
+
+```
+
+```{r}
+left_join_result <- left_join(accuracy_knn$train, accuracy_knn$test, by = "k")
+
+knitr::kable(left_join_result, 
+             caption = "Predictive accuracy - kNN", 
+             col.names = c("k", "training", "test"), 
+             digits = 3)
+```
+```{r}
+plot(c(1:20), as.vector(1 - (accuracy_knn$test[,'accuracy'])$accuracy), type = "b", col = "dodgerblue", cex = 1, pch = 20, 
+     xlab = "k, number of neighbors", ylab = "classification error",
+     main = "(Test) Error Rate vs Neighbors")
+# add line for min error seen
+abline(h = min(as.vector(1 - (accuracy_knn$test[,'accuracy'])$accuracy)), col = "darkorange", lty = 3)
+# add line for minority prevalence in test set
+abline(h = mean(study_data_tst == "Alizahmer"), col = "grey", lty = 2)
+```
+Cross validated *k* values vs cross-validation error.
+
+```{r}
+plot(knn_fit)
+```
+
+```{r results='asis'}
+knitr::kable(get_best_result(knn_fit), caption = "kNN model specifications cross validation")
+```
+
+## Random forest  
+
+```{r}
+train_pred = predict(rf_gridsearch, study_data_trn)
+```
+
+```{r}
+train_tab = table(train_pred, study_data_trn$Outcome)
+```
+
+```{r}
+train_con_mat_knn_reg = confusionMatrix(train_tab, positive = "Alizahmer")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat_knn_reg$overall["Accuracy"],
+train_con_mat_knn_reg$byClass["Sensitivity"],
+train_con_mat_knn_reg$byClass["Specificity"], 
+train_con_mat_knn_reg$byClass["Pos Pred Value"],
+train_con_mat_knn_reg$byClass["Neg Pred Value"],
+train_con_mat_knn_reg$byClass["Prevalence"],
+train_con_mat_knn_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data, random forest")
+```
+
+```{r}
+test_pred = predict(rf_gridsearch, study_data_tst)
+```
+
+```{r}
+test_tab = table(test_pred, study_data_tst$Outcome)
+```
+
+```{r}
+train_con_mat_rf = confusionMatrix(test_tab, positive = "Alizahmer")
+
+knitr::kable(test_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data, random forest")
+
+knitr::kable(c(train_con_mat_rf$overall["Accuracy"],
+train_con_mat_rf$byClass["Sensitivity"],
+train_con_mat_rf$byClass["Specificity"], 
+train_con_mat_rf$byClass["Pos Pred Value"],
+train_con_mat_rf$byClass["Neg Pred Value"],
+train_con_mat_rf$byClass["Prevalence"],
+train_con_mat_rf$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data, random forest")
+```
+
+```{r importance1, echo=FALSE, fig.cap="Features from Random Forest"}
+
+vip(rf_gridsearch, num_features = 5, geom = "point", horizontal = FALSE, 
+    aesthetics = list(color = "red", shape = 17, size = 4)) +
+  theme_light()
+```
+
+## Simple GBM
+
+```{r df, echo=FALSE, fig.height=5, fig.width=6, fig.cap="Error Vs trees"}
+gbm.perf(boost_model, method = "cv")
+```
+
+
+```{r results='asis'}
+knitr::kable(get_best_result(seat_gbm_tune), caption = "GBM model specifications cross validation")
+```
+
+```{r}
+pred_bayes_boost_cv <- create_bayes_classifier (
+  function(data) predict(seat_gbm_tune, data, type="prob")[,"Alizahmer"]
+)
+```
+
+
+```{r}
+train_pred = pred_bayes_boost_cv(study_data_trn, 0.5)
+```
+
+```{r}
+train_tab = table(train_pred$classes_predicted, study_data_trn$Outcome)
+```
+
+```{r}
+train_con_mat_boost_reg = confusionMatrix(train_tab, positive = "Alizahmer")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat_boost_reg$overall["Accuracy"],
+train_con_mat_boost_reg$byClass["Sensitivity"],
+train_con_mat_boost_reg$byClass["Specificity"], 
+train_con_mat_boost_reg$byClass["Pos Pred Value"],
+train_con_mat_boost_reg$byClass["Neg Pred Value"],
+train_con_mat_boost_reg$byClass["Prevalence"],
+train_con_mat_boost_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+```{r}
+test_pred = pred_bayes_boost_cv(study_data_tst, 0.5)
+```
+
+```{r}
+test_tab = table(test_pred$classes_predicted, study_data_tst$Outcome)
+```
+
+```{r}
+tst_con_mat_boost_reg = confusionMatrix(test_tab, positive = "Alizahmer")
+
+knitr::kable(test_tab, 
+      col.names = c("Actual Control", "Actual Alizahmer"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(tst_con_mat_boost_reg$overall["Accuracy"],
+tst_con_mat_boost_reg$byClass["Sensitivity"],
+tst_con_mat_boost_reg$byClass["Specificity"], 
+tst_con_mat_boost_reg$byClass["Pos Pred Value"],
+tst_con_mat_boost_reg$byClass["Neg Pred Value"],
+tst_con_mat_boost_reg$byClass["Prevalence"],
+tst_con_mat_boost_reg$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+## Stacking - custom tuned
+
+For building custom base learners, example: for simple boosting (*gbm*), I used the following for tuning the parameters: interaction depth = 1 to 7; number of trees from 500 to 3,000; shrinkage = 0.5, 0.3, 0.1, 0.05, 0.01; and the minimum number of observations in a node of the tree 5, 10, 15, 20. For elastic net (*glmnet*) between 0 and 1 with 0.01 step and lambda were selected from hundred values that goes from ten to the power of 5 and ten to the power of -18. The code is provided under stacking-custom section.  
+
+```{r eval=FALSE, include=FALSE}
+
+# stacking-custom, section 
+
+# The result of the following code is not included in this report.
+
+gbm_grid_2 =  expand.grid(interaction.depth = 1:7,
+                        n.trees = (1:6) * 100,
+                        shrinkage = c(0.5, 0.3, 0.1, 0.05, 0.01),
+                        n.minobsinnode = c(5, 10, 15, 20))
+
+ensemble_control <- caret::trainControl(
+  method="cv",
+  number=5,
+  verboseIter = FALSE,
+  savePredictions = "final")
+
+model_list_big <- caretEnsemble::caretList(Outcome~., data=study_data_trn,
+  trControl=ensemble_control,
+tuneList=list(
+    elastic = caretEnsemble::caretModelSpec(method = "glmnet",  family= "binomial",
+                           tuneGrid = expand.grid(alpha = seq(0, 1, by = 0.01), lambda = lambda_seq)),
+    gbm=caretEnsemble::caretModelSpec(method="gbm", tuneGrid=gbm_grid_2)),
+
+  metric="Accuracy", 
+  methodList = c("glmnet", "gbm")); model_list_big
+
+```
+
+```{r}
+# correlation between results
+knitr::kable(modelCor(output), caption = "Correlation between the base learners model", digits = 2)
+```
+```{r sadf, echo=FALSE,fig.width=3, fig.cap="Correlation plot for the base learners"}
+
+splom(output)
+```
+
+```{r results='asis'}
+knitr::kable(tidy(cm), caption = "Summary result for the stacked model", digits = 2)
+```
+
+```{r importance, echo=FALSE, fig.height=4, fig.width=5, fig.cap="Features from tuned GBM model"}
+
+vip(seat_gbm_tune, num_features = 5, geom = "point", horizontal = FALSE, 
+    aesthetics = list(color = "red", shape = 17, size = 4)) +
+  theme_light()
+```
+
+
+
+
+\pagebreak
+```{r}
+# Load the necessary libraries
+library(caret)
+library(dplyr)
+
+# Load the dataset (replace with your own data)
+data(iris)
+df <- iris
+
+# Split the data into training and testing sets
+set.seed(123)
+trainIndex <- createDataPartition(df$Species, p = .8, list = FALSE)
+train <- df[trainIndex, ]
+test <- df[-trainIndex, ]
+
+# Create a formula for logistic regression
+formula <- as.formula("Outcome ~ .")
+
+# Create a pre-processing step that performs PCA
+preProc <- preProcess(study_data_trn, method = "pca")
+
+# Create a grid of possible values for the number of components to retain
+pcaGrid <- expand.grid(ncomp = 1:90)
+
+# Use cross-validation to find the optimal number of components
+set.seed(2)
+fitControl <- trainControl(method = "cv", number = 10)
+pcaTune <- train(
+  formula,
+  data = study_data_trn,
+  method = "glm",
+  preProcess = preProc,
+  tuneGrid = pcaGrid,
+  trControl = fitControl,
+  metric = "Accuracy"
+)
+
+# Use the optimal number of components to fit a logistic regression model
+pcaModel <- glm(
+  formula,
+  data = train,
+  family = "binomial",
+  subset = pcaTune$bestTune$ncomp,
+  na.action = na.exclude
+)
+
+# Use the model to make predictions on the testing set
+predictions <- predict(pcaModel, test, type = "response")
+
+# Evaluate the accuracy of the model
+accuracy <- mean(predictions == test$Species)
+
+```
+
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```

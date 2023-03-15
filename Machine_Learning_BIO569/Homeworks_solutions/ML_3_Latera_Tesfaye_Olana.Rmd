@@ -1,0 +1,697 @@
+---
+title: "Machine Learning Homework 3"
+author: "Latera Tesfaye Olana"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  pdf_document: 
+    fig_caption: yes
+header-includes:
+ \usepackage{float}
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r global_options, include=FALSE}
+knitr::opts_chunk$set(fig.pos = 'H')
+```
+
+```{r setup, include=FALSE}
+### Setting up the packages
+library(knitr)
+knitr::opts_chunk$set(echo = FALSE)
+# check if packages are installed; if not, install them
+packages <- c("tidyverse", "readr", "ggExtra", "plotly",
+              "ggplot2","ggstatsplot","ggside","rigr","nlme","lmtest",
+              "sandwich","gridExtra","broom","janitor","ellipse","caret",
+              "pROC","MASS","class","purrr","tidyr","ggcorrplot","glmnet")
+not_installed <- setdiff(packages, rownames(installed.packages()))
+if (length(not_installed)) install.packages(not_installed)
+
+# load packages
+library(sandwich)
+library(ggcorrplot)
+library(glmnet)
+library(janitor)
+library(readr)
+library(lmtest)
+library(class)
+library(pROC)
+library(nlme)
+library(ellipse)
+library(broom)
+library(ggstatsplot)
+library(ggside)
+library(caret)
+library(rigr)
+library(ggExtra)
+library(gridExtra)
+library(purrr)
+library(plotly)
+library(ggplot2)
+library(MASS)
+library(tidyverse) 
+library(tidyr)
+
+```
+
+```{r, Q1a, warning=F, message=F}
+### -----------------------------------------------------------
+#Loading working directory of the raw data
+
+#Please load your data/directory by changing it with your work directory
+#Throughout this code module you will see a tone of places, where
+#data is read and written, so please make sure to change them to your
+#working directory folder format
+
+working_directory_data <- setwd("C:/Users/latera/Desktop/ML_ass")
+
+#loads the data on a variable df
+study_data <- read.csv("data/wdbc.data", header=FALSE) %>%
+  dplyr::select(diagnosis = V2, P_ = V3:V32) %>%
+  mutate(diagnosis = factor(diagnosis, levels = c("B", "M"), 
+                            labels = c("Benign", "Malignant")))
+
+#Describe the data
+#as.tibble(study_data)
+```
+
+```{r message=FALSE, results='hide'}
+
+#Check if the outcome is factor
+is.factor(study_data$diagnosis)
+
+```
+
+## Question 1
+
+**Question 1a:** The following table provides summary of the given data.
+
+```{r q1a, results='asis'}
+summary <- study_data %>%
+  group_by(diagnosis) %>%
+  dplyr::summarise(observations = n())
+
+knitr::kable(summary, caption = "Summary table of the data")
+```
+
+The given data has `r summary$observations[1]` Benign outcome observations and `r summary$observations[2]` Malignant observations.
+The data has two predictors (p=30).
+Overall, the data has `r summary$observations[1] + summary$observations[2]` observations.
+This data has no missing values.
+
+**Question 1b:**\
+The data is divided into two, training and test with each containing `r round(((400/569)*100), 2)` and `r round((100 - ((400/569)*100)), 2)`, fo the data respectively.
+
+```{r 1b}
+set.seed(2)
+study_data_idx = sample(nrow(study_data), 400)
+study_data_trn = study_data[study_data_idx, ]
+study_data_tst = study_data[-study_data_idx, ]
+```
+
+**Question 1c:**
+
+```{r 1c_normalizer}
+normalize_predictors <- function(df) {
+  # Get the column names of the predictors
+  predictor_cols <- names(df)[2:31]
+  
+  # Loop over the predictors and normalize each one
+  for (col in predictor_cols) {
+    df[[col]] <- (df[[col]] - mean(df[[col]])) / sd(df[[col]])
+  }
+  
+  return(df)
+}
+
+```
+
+```{r 1c_apply_normalizer}
+# Apply normalization to the training set
+study_data_trn <- normalize_predictors(study_data_trn)
+
+# Apply normalization to the test set
+study_data_tst <- normalize_predictors(study_data_tst)
+
+```
+
+It is imperative to perform normalization separately on the training and test sets to prevent data leakage. If the entire dataset (i.e., both training and test) is normalized before splitting, the training set is normalized using information from the test set, leading to overfitting.
+
+It is essential to normalize the training and test sets separately, using only information from their respective sets. This approach ensures that the normalization is not based on information from the other set, which helps to ensure that the model can generalize well to unseen data.
+
+**Question 1d:**
+
+```{r}
+compute_corr_matrix <- function(df) {
+  # Select all columns except the first one (assumed to be the response variable)
+  X_cols <- 2:ncol(df)
+  
+  # Compute the correlation matrix on the predictors
+  corr_mat <- cor(df[, X_cols])
+  
+  # Plot the correlation matrix using ggcorrplot
+  ggcorrplot(corr_mat, type = "lower", lab = FALSE, 
+             title = "Correlation Matrix of Predictors",
+             ggtheme = ggplot2::theme_gray,
+             legend.title = "Correlation scale")
+}
+
+```
+
+```{r fig.height=10, fig.width=14, fig.cap="Correlation matrix for our train data"}
+compute_corr_matrix(study_data_trn)
+```
+
+
+\pagebreak
+As it is shown in figure 1, some of the predictors are strongly correlated (both directions).
+This might have the following *general* complecations (cited):
+
+*Overfitting:* High correlation between predictors can lead to overfitting in a classification model.
+When two or more predictors are highly correlated, they can carry redundant information, causing the model to give more importance to these predictors than necessary.
+This can lead to a model that performs well on the training data but poorly on the test data.
+
+*Model Interpretability:* Correlated predictors can make it difficult to interpret the model results.
+When two or more predictors are highly correlated, it can be difficult to determine which predictor is actually driving the classification decision.
+(Lack of interpretability in most of ML is models, kind of make us to not worry that much about this issue)
+
+*Running time Complexity:* High dimensional data with correlated predictors can increase the computational complexity of a classification model.
+This is because the model needs to consider all possible combinations of predictors to determine which ones are most important.
+
+*Bias:* Correlation between predictors can lead to bias in a classification model.
+If two predictors are highly correlated, and one of them is more important for the classification decision, the model may assign too much weight to the correlated predictor, leading to a biased model.
+
+**Question 1e:**
+
+After fitting simple logistic regression, Table 2 shows the fitted coefficients for each predictors.
+
+```{r 1e_glm, warning=FALSE, include=FALSE}
+model_glm = glm(diagnosis ~ ., data = study_data_trn,
+                family = "binomial")
+
+```
+
+```{r}
+model_glm_summary <- summary(model_glm, correlation = TRUE)
+
+knitr::kable(
+  coef(model_glm_summary),
+  digits = 2,
+  caption = "Logistic regression training coefficients"
+)
+```
+
+The correlation between the variable *P_3* and *P_1* is `r list(round(model_glm_summary$correlation["P_3", "P_1"], 2))[[1]]`.
+Meaning they are highly correlated. The coefficient estimates are, $\hat{\beta_{1}}$ = `r round(coef(model_glm_summary)[2,1],2)` and $\hat{\beta_{3}}$ = `r round(coef(model_glm_summary)[4,1],2)`. These two $\hat{\beta}$ values are large (as compared to other non-correlated predictors) and opposite to each other.
+Accordingly, as stated above (in question 1d) inclusion of correlated predictors in many ways, will generate incorrect results from our models.
+
+**Question 1f:**
+
+```{r 1f_bayes_rule}
+
+#Be bayesed, this only works for type dataframe, not matrix
+create_bayes_classifier <- function(model_fit) {
+
+  function(data, thresholds) {
+
+    add_class <- function(threshold) {
+
+      classes_predicted <- factor(
+        model_fit(data) > threshold,
+        levels = c(FALSE, TRUE),
+        labels = c("Benign", "Malignant")
+      )
+
+      data %>% dplyr::mutate(
+        classes_predicted = classes_predicted,
+        threshold = threshold
+      )
+
+    }
+
+    thresholds %>% purrr::map_dfr(add_class)
+  }
+
+}
+```
+
+```{r}
+log_bayes_pred <- create_bayes_classifier(
+  function(data) predict(model_glm, data, type = "response")
+)
+```
+
+```{r}
+train_pred = log_bayes_pred(study_data_trn, 0.5)
+```
+
+```{r}
+train_tab = table(train_pred$classes_predicted, study_data_trn$diagnosis)
+```
+
+```{r}
+train_con_mat = confusionMatrix(train_tab, positive = "Malignant")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat$overall["Accuracy"],
+train_con_mat$byClass["Sensitivity"],
+train_con_mat$byClass["Specificity"], 
+train_con_mat$byClass["Pos Pred Value"],
+train_con_mat$byClass["Neg Pred Value"],
+train_con_mat$byClass["Prevalence"],
+train_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+As shown in table 3 and 4 the accuracy, sensitivity, and specificity of the model were estimated to be `r train_con_mat$overall["Accuracy"] * 100`% (no miss classification).
+However, the detection rate and prevalence were estimated to be `r train_con_mat$byClass["Prevalence"] * 100`%.
+The model is good at correctly identifying negative cases but struggles with identifying positive cases due to the low number of positive cases in the dataset (one possible reason).
+This can be a common issue in imbalanced datasets where the positive class is rare.
+
+```{r}
+trest_pred = log_bayes_pred(study_data_tst, 0.5)
+```
+
+```{r}
+test_tab = table(trest_pred$classes_predicted, study_data_tst$diagnosis)
+```
+
+```{r}
+test_con_mat = confusionMatrix(test_tab, positive = "Malignant")
+
+knitr::kable(test_tab, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5,caption = "Confussion matrix for test data")
+
+knitr::kable(c(test_con_mat$overall["Accuracy"],
+test_con_mat$byClass["Sensitivity"],
+test_con_mat$byClass["Specificity"], 
+test_con_mat$byClass["Pos Pred Value"],
+test_con_mat$byClass["Neg Pred Value"],
+test_con_mat$byClass["Prevalence"],
+test_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+test data")
+```
+
+As shown in table 5 and 6 the test accuracy is `r test_con_mat$overall["Accuracy"] * 100`%. The model's sensitivity and specificity decreased as well. This is a classical sign of over-fitting.
+
+## Question 2
+
+**Question 2a:**
+
+The data is converted into matrix.
+The new sets are: *X_study_trn, X_study_tst* for predictors train and test, whereas, *Y_study_trn, Y_study_tst* for outcome train and test.
+
+```{r}
+X_study_trn <- study_data_trn %>% select(-diagnosis) %>% as.matrix()
+X_study_tst <- study_data_tst %>% select(-diagnosis) %>% as.matrix()
+
+Y_study_trn <- study_data_trn$diagnosis
+Y_study_tst <- study_data_tst$diagnosis
+```
+
+**Question 2b:**
+
+We fitted glmnet (using a family of *binomial*) using the given different $\lambda$ values.
+
+```{r}
+# Create a grid of values for lambda
+lambda_seq <- 10^seq(5, -18, length = 100)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# Fit the ridge logistic regression model
+ridge_fit <- glmnet(X_study_trn, Y_study_trn, family = "binomial", alpha = 0, 
+                    lambda = lambda_seq)
+
+
+```
+
+
+**Question 2c:**
+
+```{r fig.height=5, fig.width=7, fig.cap="log(lambda) Vs beta values for predictor 1 and predictor 3 - ridge fit"}
+
+coef_P1 <- coef(ridge_fit)["P_1", ]
+coef_P3 <- coef(ridge_fit)["P_3", ]
+
+# Plot the coefficients in function of log(lambda)
+plot(log(ridge_fit$lambda), coef_P1, type = "l", xlab = "log(lambda)", 
+     ylab = "Coefficient")
+lines(log(ridge_fit$lambda), coef_P3, type = "l", col = "red")
+legend("bottomright", legend = c("Predictor 1 beta", "Predictor 2 beta"), 
+       col = c("black", "red"), lty = 1)
+abline(v=-10, col = "lightgray", lty = 3)
+```
+
+
+As sown in figure 2, as the value of $\lambda$ increases the estimated coefficient for the first predictor (P_1) is penalized more (hence the rapid drop).
+Before both coefficients started diverging, around $\lambda$ greater than -10, both $\beta$ values where close to zero.
+
+**Question 2d:**
+
+```{r warning=FALSE}
+cvfit <- cv.glmnet(X_study_trn, Y_study_trn, family = "binomial", 
+                   type.measure = "class",
+                   alpha = 0, lambda = lambda_seq)
+
+# Find optimal lambda value that minimizes CV error
+opt_lambda <- cvfit$lambda.min
+#cat("Optimal lambda value:", opt_lambda, "\n")
+
+```
+
+```{r fig.height=5, fig.width=7, fig.cap="Misclassification Error vs. Log(lambda)"}
+# Plot misclassification error vs. log(lambda)
+plot(cvfit, xlab = "Log(lambda)")
+```
+
+The minimum selected value of $\lambda$ = `r round(opt_lambda,5)`.
+Table 7 also shows the extracted coefficients ($\hat{\beta}$) of the selected model.
+
+```{r warning=FALSE}
+# Print the selected lambda value
+#cat("Selected lambda value:", lambda_min, "\n")
+
+# Extract the coefficients of the selected model
+coef_sel <- coef(cvfit, s = opt_lambda)
+
+
+#print(coef_sel)
+
+knitr::kable(
+  coef_sel[-3, ],
+  digits = 5,
+  col.names=c("beta values"),
+  caption = "Coefficients of the selected model, with CV"
+)
+```
+
+**Question 2e:**
+
+As shown in table 7,there are no zero coefficients (i.e, all $\beta$ values for all the predictors are non zero).
+A coefficient close to zero is that of predictor 9 (`r round (coef_sel[10,1], 5)`).
+These are the coefficients that correspond to features that have little or no impact on the target variable and can be considered irrelevant for the model.
+After performing cross-validation to determine the optimal regularization parameter (lambda), the resulting beta values will typically be non-zero for all variables in the model, but the magnitude of these coefficients will vary depending on the value of $\lambda$.
+As $\lambda$ increases, the magnitude of the coefficients will decrease and approach zero.
+Eventually, some coefficients may become exactly zero as $\lambda$ becomes very increases.
+
+**Question 2f:**
+
+```{r}
+fit_glmnet <- glmnet(x=X_study_trn, y=Y_study_trn, family = "binomial", alpha = 0, 
+              lambda = opt_lambda)
+
+```
+
+```{r}
+pred_train <- predict(fit_glmnet, newx = X_study_trn, type = "response")
+Y_train_pred <- ifelse(pred_train > 0.5, "Malignant", "Benign")
+```
+
+```{r}
+train_tab = table(Y_study_trn, Y_train_pred)
+```
+
+```{r}
+train_con_mat = confusionMatrix(train_tab, positive = "Malignant")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat$overall["Accuracy"],
+train_con_mat$byClass["Sensitivity"],
+train_con_mat$byClass["Specificity"], 
+train_con_mat$byClass["Pos Pred Value"],
+train_con_mat$byClass["Neg Pred Value"],
+train_con_mat$byClass["Prevalence"],
+train_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+As shown in table 8 and 9, the train data accuracy is `r train_con_mat$overall["Accuracy"] * 100`%, sensitivity `r train_con_mat$byClass["Sensitivity"] * 100`% and specificity `r train_con_mat$byClass["Specificity"] * 100`%.
+Looking at the confusion matrix for train dataset, the true positive for classification was `r train_tab[1,1]`.
+The false negative is `r train_tab[2,1]`; the true negative `r train_tab[2,2]` and finally the false positive is `r train_tab[1,2]`.
+
+```{r}
+pred_tst <- predict(fit_glmnet, newx = X_study_tst, type = "response")
+Y_tst_pred <- ifelse(pred_tst > 0.5, "Malignant", "Benign")
+```
+
+```{r}
+tst_tab = table(Y_study_tst, Y_tst_pred)
+```
+
+```{r}
+tst_con_mat = confusionMatrix(tst_tab, positive = "Malignant")
+
+knitr::kable(tst_tab, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5, caption = "Confussion matrix for test data")
+
+knitr::kable(c(tst_con_mat$overall["Accuracy"],
+tst_con_mat$byClass["Sensitivity"],
+tst_con_mat$byClass["Specificity"], 
+tst_con_mat$byClass["Pos Pred Value"],
+tst_con_mat$byClass["Neg Pred Value"],
+tst_con_mat$byClass["Prevalence"],
+tst_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+test data")
+```
+
+As shown in table 10 and 11, the test data accuracy is `r tst_con_mat$overall["Accuracy"] * 100`%, sensitivity is `r tst_con_mat$byClass["Sensitivity"] * 100`% and specificity `r tst_con_mat$byClass["Specificity"] * 100`%.
+Looking at the confusion matrix for test dataset, the true positive for classification was `r tst_tab[1,1]`.
+The false negative is `r tst_tab[2,1]`; the true negative `r tst_tab[2,2]` and finally the false positive is `r tst_tab[1,2]`.\
+
+The accuracy of the test and train set are close to each other, implying the model is performing well interms of not overfitting.
+
+**Question 2g:**
+
+```{r echo=FALSE, fig.cap="RoC curve for regularized linear fit", fig.height=5, fig.width=7, message=FALSE, warning=FALSE}
+
+test_roc = roc(Y_study_tst ~ pred_tst, plot = TRUE, 
+               print.auc = TRUE, col=8)
+
+```
+
+Figure 3 shows the RoC plot for regularized *glm* fit.
+
+**Question 2h:**
+
+The area under the curve from the RoC curve is `r round(test_roc$auc,3) *100`%.
+
+## Question 3
+
+**Question 3b:**
+
+We fitted regularized lasso (using a family of *binomial*) using the given different $\lambda$ values.
+
+```{r}
+# Create a grid of values for lambda
+lambda_seq <- 10^seq(5, -18, length = 100)
+```
+
+```{r warning=FALSE}
+# Fit the ridge logistic regression model
+lasso_fit <- glmnet(X_study_trn, Y_study_trn, family = "binomial", alpha = 1, 
+                    lambda = lambda_seq)
+
+```
+
+**Question 3c:**
+
+
+```{r echo=FALSE, fig.height=5, fig.width=7, fig.cap="log(lambda) Vs beta values for predictor 1 and predictor 3 - Lasso"}
+
+coef_P1 <- coef(lasso_fit)["P_1", ]
+coef_P3 <- coef(lasso_fit)["P_3", ]
+
+# Plot the coefficients in function of log(lambda)
+plot(log(lasso_fit$lambda), coef_P1, type = "l", xlab = "log(lambda)", 
+     ylab = "Coefficient")
+lines(log(lasso_fit$lambda), coef_P3, type = "l", col = "red")
+legend("bottomright", legend = c("Predictor 1 beta", "Predictor 2 beta"), 
+       col = c("black", "red"), lty = 1)
+abline(v=-7.7, col = "lightgray", lty = 3)
+```
+
+For lasso regression the $\beta$ coefficient for predictor number three (P_3) is zero.
+For $\beta$ estimates of predictor one (P_1), as the penalty increases, the coefficient is gradually shrinking towards zero (more radically after $\log{(\lambda)}$ = - 20).
+It reaches the value of $\log{(\lambda)}$ around -8 (as shown in figure 4).
+
+**Question 3d:**
+
+```{r warning=FALSE}
+cvfit <- cv.glmnet(X_study_trn, Y_study_trn, family = "binomial", 
+                   type.measure = "class",
+                   alpha = 1, lambda = lambda_seq)
+
+# Find optimal lambda value that minimizes CV error
+opt_lambda <- cvfit$lambda.min
+#cat("Optimal lambda value:", opt_lambda, "\n")
+
+```
+
+```{r fig.height=5, fig.width=7, fig.cap="isclassification Error vs. Log(lambda)"}
+# Plot misclassification error vs. log(lambda)
+plot(cvfit, xlab = "Log(lambda)")
+```
+
+The minimum selected value of $\lambda$ = `r round(opt_lambda,5)`.
+Table 12 also shows the extracted coefficients ($\hat{\beta}$) of the selected model.
+
+```{r warning=FALSE}
+# Print the selected lambda value
+#cat("Selected lambda value:", lambda_min, "\n")
+
+# Extract the coefficients of the selected model
+coef_sel <- coef(cvfit, s = opt_lambda)
+
+
+#print(coef_sel)
+
+knitr::kable(
+  coef_sel[-3, ],
+  digits = 5,
+  col.names=c("beta values"),
+  caption = "Coefficients of the selected model, with CV"
+)
+```
+
+**Question 3e:**
+
+After cross validation for lasso regularization, there are `r sum(coef_sel[-3, ] == 0)` $\beta$ values which are zero and `r sum(coef_sel[-3, ] != 0)` non-zero coefficients.
+This is large compared to ridge regularization (but expected!).
+
+**Question 3f:**
+
+```{r}
+fit_glmnet <- glmnet(x=X_study_trn, y=Y_study_trn, family = "binomial", alpha = 1, 
+              lambda = opt_lambda)
+
+```
+
+```{r}
+pred_train <- predict(fit_glmnet, newx = X_study_trn, type = "response")
+Y_train_pred <- ifelse(pred_train > 0.5, "Malignant", "Benign")
+```
+
+```{r}
+train_tab = table(Y_study_trn, Y_train_pred)
+```
+
+```{r}
+train_con_mat = confusionMatrix(train_tab, positive = "Malignant")
+
+knitr::kable(train_tab, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5,caption = "Confussion matrix for train data")
+
+knitr::kable(c(train_con_mat$overall["Accuracy"],
+train_con_mat$byClass["Sensitivity"],
+train_con_mat$byClass["Specificity"], 
+train_con_mat$byClass["Pos Pred Value"],
+train_con_mat$byClass["Neg Pred Value"],
+train_con_mat$byClass["Prevalence"],
+train_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+As shown in table 13 and 14, the train data accuracy is `r train_con_mat$overall["Accuracy"] * 100`%, sensitivity `r train_con_mat$byClass["Sensitivity"] * 100`% and specificity `r train_con_mat$byClass["Specificity"] * 100`%.
+Looking at the confusion matrix for train dataset, the true positive for classification was `r train_tab[1,1]`.
+The false negative is `r train_tab[2,1]`; the true negative `r train_tab[2,2]` and finally the false positive is `r train_tab[1,2]`.
+
+```{r}
+pred_tst <- predict(fit_glmnet, newx = X_study_tst, type = "response")
+Y_tst_pred <- ifelse(pred_tst > 0.5, "Malignant", "Benign")
+```
+
+```{r}
+tst_tab = table(Y_study_tst, Y_tst_pred)
+```
+
+```{r}
+tst_con_mat = confusionMatrix(tst_tab, positive = "Malignant")
+
+knitr::kable(tst_tab, 
+      col.names = c("Actual Benign", "Actual Malignant"),
+      digits = 5, caption = "Confussion matrix for train data")
+
+knitr::kable(c(tst_con_mat$overall["Accuracy"],
+tst_con_mat$byClass["Sensitivity"],
+tst_con_mat$byClass["Specificity"], 
+tst_con_mat$byClass["Pos Pred Value"],
+tst_con_mat$byClass["Neg Pred Value"],
+tst_con_mat$byClass["Prevalence"],
+tst_con_mat$byClass["Detection Rate"]),
+      col.names = c("Percentages"),
+      digits = 5,caption = "Confussion matrix for 
+train data")
+```
+
+As shown in table 15 and 16, the test data accuracy is `r tst_con_mat$overall["Accuracy"] * 100`%, sensitivity `r tst_con_mat$byClass["Sensitivity"] * 100`% and specificity `r tst_con_mat$byClass["Specificity"] * 100`%.
+Looking at the confusion matrix for test dataset, the true positive for classification was `r tst_tab[1,1]`.
+The false negative is `r tst_tab[2,1]`; the true negative `r tst_tab[2,2]` and finally the false positive is `r tst_tab[1,2]`.
+
+**Question 3g:**
+
+Figure 5 shows the RoC for lasso fit.
+
+```{r echo=FALSE, fig.cap="RoC curve for Lasso fit", fig.height=5, fig.width=7, message=FALSE, warning=FALSE}
+
+test_roc = roc(Y_study_tst ~ pred_tst, plot = TRUE, 
+               print.auc = TRUE, col=8)
+
+```
+
+**Question 3h:**
+
+The area under the curve from the RoC curve is `r round(test_roc$auc,3) *100`%.
+
+\pagebreak
+## Question 4
+
+Recap of accuracy:
+
+-   For lasso fit on the test data the accuracy is 98.81%, sensitivity 100% and specificity 98.08%.
+    Whereas, on train data, accuracy is 98.75%, sensitivity 99.30% and specificity 98.45%.
+
+-   For ridge fit on the test data the accuracy is 98.80%, sensitivity 100% and specificity 98.10%.
+    Whereas, in the train data the accuracy is 99.0%, sensitivity 99.3% and specificity 98.8%.
+
+-   For simple logistic fit the accuracy, sensitivity, and specificity of the model on train data are estimated to be 100%.
+    Whereas, on test data the test accuracy is 94.08%, sensitivity 89.55%, and specificity 97.06%.
+
+First thing first, the simple logistic fit is the worst.
+The lasso and ridge have similar (not identical) performance, in terms of test accuracy.
+I guess for me given the closeness in their value of test accuracy, specificity and sensitivity, I would say one can perform as best as the other one.
+However, if I had to choose one, ridge tends to over fit (just a tiny amount), as compared to lasso.
+On related note, lasso only uses 15 (half of the predictors), where as ridge uses all the predictors (even though, the magnitude of the impact varies across each predictor). However, logistic regression would be more suitable if we are more concerned about interpretation. Unpopular thought, never ever, the use of more complicated (advanced) machine learning models be compromised by the fear of interaprebaility. In fact, when comparing conventional statistics to machine learning, the only real concern should be the quality of the data being used. If the data is of sufficient quality to allow for the application of statistical methods, then it is undoubtedly suitable for machine learning models as well.
+
+Many researchers may believe that their research objectives and questions are better suited for statistical models, such as finding odds ratios or relative risk. However, the increasing popularity of AI methods for pattern detection and other applications is quickly rendering such generalized metrics obsolete. By utilizing these new AI tools, researchers can unlock insights that were previously unattainable, allowing for a deeper understanding of complex data sets.
+
+Therefore, we should not be afraid to explore the full potential of advanced machine learning models. By embracing these powerful tools and adopting a data-driven approach, we can unlock new insights and discoveries that will help us tackle some of the world's most pressing challenges.
+
+(*the accuracy values indicated in question 4 might vary from the rest of my answer as they are static values. I realized I have been using the same variable across all models, so here I had to manually add them before the PDF was generated.*)
+
+\pagebreak
+
+## Code Appendix
+
+```{r, ref.label=knitr::all_labels(),echo=TRUE,eval=FALSE}
+```
